@@ -5,6 +5,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { randomUUID } from 'node:crypto';
 import dotenv from 'dotenv';
+import { GoogleGenAI } from '@google/genai';
 
 dotenv.config();
 
@@ -15,15 +16,25 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 const ORIGIN = process.env.ORIGIN || `http://localhost:${PORT}`;
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY || '';
-const GEMINI_MODEL = process.env.GEMINI_MODEL || 'gemini-1.5-flash';
+let GEMINI_MODEL = process.env.GEMINI_MODEL || 'gemini-1.5-flash-latest';
 const SUPPORT_PERSONA = (process.env.SUPPORT_PERSONA || `
-You are SupportBot, a helpful, professional customer support agent for our demo app.
-- Always respond in a friendly, concise customer-support tone.
-- Ask clarifying questions when details are missing (e.g., order ID, email on account).
-- Provide step-by-step troubleshooting when relevant.
-- If something is unknown or outside scope, say you don't have that information and suggest the next best step.
-- Never make policy or pricing claims; instead, refer to "our policy" generically and suggest contacting a human if needed.
+You are SupportBot, a helpful, professional customer support agent for Chandigarh University (CU).
+- Maintain a friendly, concise support tone tailored to prospective and current CU students and parents.
+- Topics include admissions & eligibility, fees & scholarships, programs, hostel/facilities, exams/results, placements, and connecting with a human agent.
+- Ask for relevant details (e.g., application number, department, program, semester) when needed.
+- Do not invent policies; if unsure, provide generic guidance and suggest contacting CU official support.
+- When helpful, end with up to 3 short, clickable suggestion options separated by a pipe character (e.g., Admissions | Fees | Hostel).
 `).trim();
+
+function normalizeModelName(name = '') {
+  let n = (name || '').trim();
+  if (n.startsWith('models/')) n = n.slice('models/'.length);
+  if (n === 'gemini-2.5-flash' || n === 'gemini-2.5-flash-latest') return 'gemini-2.5-flash';
+  if (n === 'gemini-1.5-flash' ) return 'gemini-1.5-flash-latest';
+  if (n === 'gemini-1.5-pro' ) return 'gemini-1.5-pro-latest';
+  return n || 'gemini-1.5-flash-latest';
+}
+GEMINI_MODEL = normalizeModelName(GEMINI_MODEL);
 
 if (!GEMINI_API_KEY) {
   console.warn('[warn] GEMINI_API_KEY is not set. Set it in your .env file.');
@@ -33,7 +44,7 @@ if (!GEMINI_API_KEY) {
 const sessions = new Map(); // sid -> { history: Array<{ role: 'user'|'model', text: string }>, createdAt: number }
 
 app.use(morgan('dev'));
-app.use(express.json({ limit: '1mb' }));
+app.use(express.json({ limit: '10mb' }));
 app.use(
   cors({
     origin: ORIGIN,
@@ -93,16 +104,88 @@ function historyToContents(history) {
   }));
 }
 
-async function streamGemini({ model, apiKey, contents, generationConfig }) {
-  const url = new URL(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:streamGenerateContent`);
-  url.searchParams.set('alt', 'sse');
-  url.searchParams.set('key', apiKey);
+// Initialize Google AI client
+const genAI = new GoogleGenAI({ apiKey: GEMINI_API_KEY, apiEndpoint: 'https://generativelanguage.googleapis.com' });
 
-  const body = {
-    systemInstruction: {
-      parts: [{ text: SUPPORT_PERSONA }],
+function pickFallbackModel(models = []) {
+  const names = models.map(m => m.name).filter(Boolean);
+  const prefer = [
+    'gemini-2.5-flash',
+    'gemini-2.0-flash',
+    'gemini-1.5-flash-latest',
+    'gemini-1.5-pro-latest',
+    'gemini-1.5-flash',
+    'gemini-1.5-pro',
+  ];
+  for (const p of prefer) {
+    const found = names.find(n => n.includes(p));
+    if (found) return normalizeModelName(found);
+  }
+  return names[0] || normalizeModelName(GEMINI_MODEL);
+}
+
+async function streamWithSDK({ model, contents, generationConfig, onChunk }) {
+  const mdl = normalizeModelName(model);
+  const personaContent = SUPPORT_PERSONA ? [{ role: 'user', parts: [{ text: SUPPORT_PERSONA }] }] : [];
+  const fullContents = [...personaContent, ...contents];
+
+  // Try streaming first
+  const result = await genAI.models.generateContentStream({
+    model: mdl,
+    contents: fullContents,
+    generationConfig: {
+      temperature: 0.2,
+      topP: 0.9,
+      topK: 40,
+      maxOutputTokens: 1024,
+      ...(generationConfig || {}),
     },
-    contents,
+  });
+
+  const iter = (result && typeof result.stream?.[Symbol.asyncIterator] === 'function')
+    ? result.stream
+    : (typeof result?.[Symbol.asyncIterator] === 'function' ? result : null);
+
+  if (iter) {
+    for await (const chunk of iter) {
+      const t = chunk?.text
+        ? (typeof chunk.text === 'function' ? chunk.text() : chunk.text)
+        : (chunk?.candidates?.[0]?.content?.parts?.map(p => p.text).join('') || '');
+      if (t) onChunk(t);
+    }
+    return;
+  }
+
+  // Fallback to non-streaming once via SDK if stream not iterable
+  const { response } = await genAI.models.generateContent({
+    model: mdl,
+    contents: fullContents,
+    generationConfig: {
+      temperature: 0.2,
+      topP: 0.9,
+      topK: 40,
+      maxOutputTokens: 1024,
+      ...(generationConfig || {}),
+    },
+  });
+  const text = response?.candidates?.[0]?.content?.parts?.map(p => p.text).join('') || '';
+  if (text) onChunk(text);
+}
+
+function modelForApiVersion(version, name) {
+  const n = normalizeModelName(name);
+  if (version === 'v1') {
+    if (n === 'gemini-1.5-flash-latest') return 'gemini-1.5-flash';
+    if (n === 'gemini-1.5-pro-latest') return 'gemini-1.5-pro';
+    return n; // gemini-2.5-flash stays as-is
+  }
+  return n; // v1beta accepts -latest variants
+}
+
+async function generateOnceHTTP({ model, contents, generationConfig }) {
+  const personaContent = SUPPORT_PERSONA ? [{ role: 'user', parts: [{ text: SUPPORT_PERSONA }] }] : [];
+  const body = {
+    contents: [...personaContent, ...contents],
     generationConfig: {
       temperature: 0.2,
       topP: 0.9,
@@ -112,101 +195,174 @@ async function streamGemini({ model, apiKey, contents, generationConfig }) {
     },
   };
 
-  const resp = await fetch(url, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify(body),
-  });
-
-  if (!resp.ok || !resp.body) {
-    const text = await resp.text().catch(() => '');
-    const err = new Error(`Gemini API error: ${resp.status} ${resp.statusText} ${text}`);
-    err.status = resp.status;
-    throw err;
+  const versions = ['v1', 'v1beta'];
+  let lastErr;
+  for (const ver of versions) {
+    try {
+      const mdl = modelForApiVersion(ver, model);
+      const url = new URL(`https://generativelanguage.googleapis.com/${ver}/models/${encodeURIComponent(mdl)}:generateContent`);
+      url.searchParams.set('key', GEMINI_API_KEY);
+      const resp = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      if (!resp.ok) {
+        const t = await resp.text().catch(() => '');
+        const err = new Error(`Gemini API error: ${resp.status} ${resp.statusText} ${t}`);
+        err.status = resp.status;
+        throw err;
+      }
+      const json = await resp.json();
+      const parts = json?.candidates?.[0]?.content?.parts || [];
+      return parts.map(p => p.text || '').join('');
+    } catch (e) {
+      lastErr = e;
+    }
   }
+  throw lastErr;
+}
 
-  return resp.body; // ReadableStream of SSE events
+async function streamWithHTTP({ model, contents, generationConfig, onChunk }) {
+  const personaContent = SUPPORT_PERSONA ? [{ role: 'user', parts: [{ text: SUPPORT_PERSONA }] }] : [];
+  const body = {
+    contents: [...personaContent, ...contents],
+    generationConfig: {
+      temperature: 0.2,
+      topP: 0.9,
+      topK: 40,
+      maxOutputTokens: 1024,
+      ...(generationConfig || {}),
+    },
+  };
+
+  // Try v1 then v1beta
+  const versions = ['v1', 'v1beta'];
+  let lastErr;
+  for (const ver of versions) {
+    try {
+      const mdl = modelForApiVersion(ver, model);
+      const url = new URL(`https://generativelanguage.googleapis.com/${ver}/models/${encodeURIComponent(mdl)}:streamGenerateContent`);
+      url.searchParams.set('alt', 'sse');
+      url.searchParams.set('key', GEMINI_API_KEY);
+      const resp = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      if (!resp.ok || !resp.body) {
+        const t = await resp.text().catch(() => '');
+        const err = new Error(`Gemini API error: ${resp.status} ${resp.statusText} ${t}`);
+        err.status = resp.status;
+        throw err;
+      }
+      const reader = resp.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        let idx;
+        while ((idx = buffer.indexOf('\n\n')) !== -1) {
+          const raw = buffer.slice(0, idx);
+          buffer = buffer.slice(idx + 2);
+          for (const line of raw.split('\n')) {
+            const trimmed = line.trim();
+            if (!trimmed.startsWith('data:')) continue;
+            const dataStr = trimmed.slice(5).trim();
+            if (!dataStr || dataStr === '[DONE]') continue;
+            try {
+              const json = JSON.parse(dataStr);
+              const candidate = json?.candidates?.[0];
+              const parts = candidate?.content?.parts || candidate?.delta?.parts || [];
+              for (const p of parts) {
+                if (typeof p.text === 'string') onChunk(p.text);
+              }
+            } catch {}
+          }
+        }
+      }
+      return; // success
+    } catch (e) {
+      lastErr = e;
+    }
+  }
+  throw lastErr;
 }
 
 app.post('/api/chat', async (req, res) => {
   try {
     const { sid, session } = getOrCreateSession(req, res);
     const message = (req.body?.message || '').toString().trim();
-    if (!message) {
-      return res.status(400).json({ error: 'Message is required' });
+    const images = Array.isArray(req.body?.images) ? req.body.images : [];
+    if (!message && images.length === 0) {
+      return res.status(400).json({ error: 'Message or image is required' });
     }
     if (!GEMINI_API_KEY) {
       return res.status(500).json({ error: 'Server not configured with GEMINI_API_KEY' });
     }
 
-    // Prepare contents with history + current user message
+    const userParts = [];
+    if (message) userParts.push({ text: message });
+    for (const img of images) {
+      if (img && typeof img.mimeType === 'string' && typeof img.data === 'string') {
+        userParts.push({ inlineData: { mimeType: img.mimeType, data: img.data } });
+      }
+    }
+
     const contents = [
       ...historyToContents(session.history),
-      { role: 'user', parts: [{ text: message }] },
+      { role: 'user', parts: userParts },
     ];
 
-    // Optimistically add user message to history
-    session.history.push({ role: 'user', text: message });
+    const imgNote = images.length ? ` (attached ${images.length} image${images.length > 1 ? 's' : ''})` : '';
+    if (message || images.length) session.history.push({ role: 'user', text: (message || 'User sent images') + imgNote });
 
-    // Start streaming response to client
     res.setHeader('Content-Type', 'text/plain; charset=utf-8');
     res.setHeader('Cache-Control', 'no-cache');
-    res.setHeader('X-Accel-Buffering', 'no'); // for nginx
+    res.setHeader('X-Accel-Buffering', 'no');
 
     let fullText = '';
+    let streamed = false;
+    const onChunk = (c) => { streamed = true; fullText += c; res.write(c); };
 
-    const sseStream = await streamGemini({
-      model: GEMINI_MODEL,
-      apiKey: GEMINI_API_KEY,
-      contents,
-    });
-
-    const reader = sseStream.getReader();
-    const decoder = new TextDecoder();
-    let buffer = '';
-
-    const flushText = (text) => {
-      if (!text) return;
-      res.write(text);
-    };
-
-    while (true) {
-      const { value, done } = await reader.read();
-      if (done) break;
-      buffer += decoder.decode(value, { stream: true });
-
-      let idx;
-      while ((idx = buffer.indexOf('\n\n')) !== -1) {
-        const rawEvent = buffer.slice(0, idx);
-        buffer = buffer.slice(idx + 2);
-        for (const line of rawEvent.split('\n')) {
-          const trimmed = line.trim();
-          if (!trimmed.startsWith('data:')) continue;
-          const dataStr = trimmed.slice(5).trim();
-          if (!dataStr || dataStr === '[DONE]') {
-            continue;
+    let modelToUse = GEMINI_MODEL;
+    try {
+      await streamWithSDK({ model: modelToUse, contents, onChunk });
+    } catch (sdkErr) {
+      console.warn('[sdk] falling back to HTTP:', sdkErr?.message || sdkErr);
+      try {
+        await streamWithHTTP({ model: modelToUse, contents, onChunk });
+      } catch (httpErr) {
+        try {
+          const list = await genAI.models.list();
+          const fallback = pickFallbackModel(list || []);
+          if (fallback && fallback !== modelToUse) {
+            console.warn(`[models] retrying with fallback model: ${fallback}`);
+            modelToUse = fallback;
+            await streamWithHTTP({ model: modelToUse, contents, onChunk });
+          } else {
+            throw httpErr;
           }
+        } catch (finalErr) {
+          console.warn('[final] streaming failed, trying non-streaming once:', finalErr?.message || finalErr);
           try {
-            const json = JSON.parse(dataStr);
-            // Typical shape: { candidates: [ { content: { parts: [{ text }] } } ] }
-            const candidate = json?.candidates?.[0];
-            const parts = candidate?.content?.parts || candidate?.delta?.parts || [];
-            for (const p of parts) {
-              if (typeof p.text === 'string') {
-                fullText += p.text;
-                flushText(p.text);
-              }
-            }
-          } catch (e) {
-            // Ignore parse errors for keep-alive/heartbeat lines
+            const txt = await generateOnceHTTP({ model: modelToUse, contents });
+            if (txt) { fullText += txt; res.write(txt); streamed = true; }
+          } catch (genErr) {
+            throw genErr;
           }
         }
       }
     }
 
-    // Save model response into history
+    if (!streamed) {
+      const placeholder = 'I could not generate a response. Please try again.';
+      fullText += placeholder;
+      res.write(placeholder);
+    }
+
     if (fullText.trim()) {
       session.history.push({ role: 'model', text: fullText });
     }
@@ -229,7 +385,6 @@ app.post('/api/reset', (req, res) => {
   res.json({ ok: true });
 });
 
-// Fallback to index.html for root
 app.get('*', (_req, res, next) => {
   if (_req.path.startsWith('/api/')) return next();
   res.sendFile(path.join(__dirname, 'public', 'index.html'));

@@ -5,6 +5,9 @@ const newChatBtn = document.getElementById('newChatBtn');
 const headerNewChatBtn = document.getElementById('headerNewChatBtn');
 const stopBtn = document.getElementById('stopBtn');
 const sendBtn = document.getElementById('sendBtn');
+const attachBtn = document.getElementById('attachBtn');
+const fileInput = document.getElementById('fileInput');
+const attachmentsBar = document.getElementById('attachmentsBar');
 const overlay = document.getElementById('warningOverlay');
 const acceptWarningBtn = document.getElementById('acceptWarningBtn');
 
@@ -22,10 +25,32 @@ const historyListEl = document.getElementById('historyList');
 const historyEmptyEl = document.getElementById('historyEmpty');
 
 let currentController = null;
-
-// Local history state
-let conversations = [];
+let queuedImages = [];
+// Added missing state arrays used by history/new chat flows
 let activeMessages = [];
+let conversations = [];
+
+// Autosize textarea
+function autosize() {
+  try {
+    input.style.height = 'auto';
+    const h = Math.min(input.scrollHeight || 0, 200);
+    input.style.height = (h || 48) + 'px';
+  } catch (_) {}
+}
+input?.addEventListener('input', autosize);
+autosize();
+
+// Guided options for Chandigarh University support (sample)
+const CU_QUICK_REPLIES = [
+  'Admissions & Eligibility',
+  'Fees & Scholarships',
+  'Programs & Curriculum',
+  'Hostel & Facilities',
+  'Exams & Results',
+  'Placements & Internships',
+  'Contact a Human Agent'
+];
 
 function loadConvos() {
   try {
@@ -56,7 +81,26 @@ function renderHistory() {
     item.className = 'history-item';
     const dot = document.createElement('div'); dot.className = 'h-dot';
     const title = document.createElement('div'); title.className = 'h-title'; title.textContent = c.title || 'Conversation';
-    item.appendChild(dot); item.appendChild(title);
+
+    const del = document.createElement('button');
+    del.type = 'button';
+    del.className = 'h-del';
+    del.title = 'Delete conversation';
+    del.setAttribute('aria-label', 'Delete conversation');
+    del.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none"><path d="M6 7h12m-9 0V5a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2v2m-9 0l1 12a2 2 0 0 0 2 2h4a2 2 0 0 0 2-2l1-12" stroke="#cbd1ff" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+    del.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const idx = conversations.findIndex(x => x.id === c.id);
+      if (idx > -1) {
+        conversations.splice(idx, 1);
+        saveConvos();
+        renderHistory();
+      }
+    });
+
+    item.appendChild(dot);
+    item.appendChild(title);
+    item.appendChild(del);
     item.addEventListener('click', () => renderTranscript(c.messages || []));
     historyListEl.appendChild(item);
   });
@@ -119,13 +163,57 @@ input.addEventListener('keydown', (e) => {
   }
 });
 
+function addAttachmentPreview(file, dataUrl) {
+  const wrap = document.createElement('div');
+  wrap.className = 'att';
+  const img = document.createElement('img');
+  img.className = 'thumb';
+  img.src = dataUrl;
+  const name = document.createElement('div');
+  name.className = 'name';
+  name.textContent = file.name;
+  const remove = document.createElement('button');
+  remove.className = 'remove';
+  remove.innerHTML = '×';
+  remove.addEventListener('click', () => {
+    queuedImages = queuedImages.filter(x => x.name !== file.name || x.size !== file.size);
+    wrap.remove();
+  });
+  wrap.appendChild(img); wrap.appendChild(name); wrap.appendChild(remove);
+  attachmentsBar.appendChild(wrap);
+}
+
+attachBtn?.addEventListener('click', () => fileInput?.click());
+fileInput?.addEventListener('change', () => {
+  const files = Array.from(fileInput.files || []);
+  const maxSize = 1.5 * 1024 * 1024; // 1.5MB
+  for (const f of files) {
+    if (!/^image\/(png|jpeg|webp)$/.test(f.type)) continue;
+    if (f.size > maxSize) { console.warn('Skipping large file', f.name); continue; }
+    const reader = new FileReader();
+    reader.onload = () => {
+      const dataUrl = reader.result;
+      const base64 = (dataUrl.split(',')[1] || '');
+      queuedImages.push({ name: f.name, size: f.size, mimeType: f.type, data: base64 });
+      addAttachmentPreview(f, dataUrl);
+    };
+    reader.readAsDataURL(f);
+  }
+  // reset input so same file change can retrigger
+  fileInput.value = '';
+});
+
 async function streamChat(message) {
   currentController = new AbortController();
   setStreaming(true);
+  const payload = { message };
+  if (queuedImages.length) {
+    payload.images = queuedImages.map(({ mimeType, data }) => ({ mimeType, data }));
+  }
   const resp = await fetch('/api/chat', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ message }),
+    body: JSON.stringify(payload),
     signal: currentController.signal,
   }).catch((e) => ({ ok: false, status: 0, text: async () => e.message }));
 
@@ -166,12 +254,19 @@ async function streamChat(message) {
 form.addEventListener('submit', async (e) => {
   e.preventDefault();
   const text = input.value.trim();
-  if (!text) return;
-  addMessage('user', text);
-  activeMessages.push({ role: 'user', text });
+  if (!text && queuedImages.length === 0) return;
+  if (text) {
+    addMessage('user', text);
+    activeMessages.push({ role: 'user', text });
+  } else {
+    addMessage('user', '[Sent images]');
+    activeMessages.push({ role: 'user', text: '[Sent images]' });
+  }
   input.value = '';
   autosize();
   await streamChat(text);
+  attachmentsBar.innerHTML = '';
+  queuedImages = [];
 });
 
 function bindNewChat(btn) {
@@ -180,8 +275,15 @@ function bindNewChat(btn) {
       saveCurrentConversationIfAny();
       if (currentController) { currentController.abort(); }
       await fetch('/api/reset', { method: 'POST' });
+      // Clear UI and local state
       messagesEl.innerHTML = '';
+      attachmentsBar.innerHTML = '';
+      queuedImages = [];
+      input.value = '';
+      autosize();
       addMessage('model', 'New chat started. How can I help you today?');
+      // Reset active conversation state
+      activeMessages = [];
     } catch (e) {
       console.error(e);
     } finally {
@@ -275,3 +377,44 @@ window.addEventListener('beforeunload', () => {
 
 // Greet on load
 addMessage('model', 'Hello! I\'m your AI support agent. Ask me anything about your account, orders, or troubleshooting.');
+
+// Quick replies feature
+function addQuickReplies(choices) {
+  const wrapper = document.createElement('div');
+  wrapper.className = 'message quick-replies-message from-bot';
+  const avatar = document.createElement('div'); avatar.className = 'avatar'; avatar.textContent = 'A';
+  const bubble = document.createElement('div'); bubble.className = 'bubble reply-choices';
+  const row = document.createElement('div'); row.className = 'quick-replies';
+  (choices || []).forEach((c) => {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'qr';
+    btn.textContent = c;
+    btn.addEventListener('click', () => {
+      input.value = c;
+      form.requestSubmit();
+    });
+    row.appendChild(btn);
+  });
+  bubble.appendChild(row);
+  wrapper.appendChild(avatar); wrapper.appendChild(bubble);
+  messagesEl.appendChild(wrapper);
+  messagesEl.scrollTop = messagesEl.scrollHeight;
+}
+
+// On first load, seed a CU-specific welcome + quick replies
+function showWelcome() {
+  messagesEl.innerHTML = '';
+  addMessage('model', "Hello! I'm the Chandigarh University support assistant. How can I help you today?");
+  addQuickReplies(CU_QUICK_REPLIES);
+}
+
+// Replace greeting with CU welcome on first login only
+(function initWelcomeOnce(){
+  try {
+    const k = 'ai_chatbot_welcome_cu';
+    if (sessionStorage.getItem(k) === '1') return;
+    sessionStorage.setItem(k, '1');
+    showWelcome();
+  } catch (e) {}
+})();
