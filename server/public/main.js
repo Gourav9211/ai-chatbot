@@ -90,6 +90,7 @@ function renderHistory() {
     del.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none"><path d="M6 7h12m-9 0V5a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2v2m-9 0l1 12a2 2 0 0 0 2 2h4a2 2 0 0 0 2-2l1-12" stroke="#cbd1ff" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>';
     del.addEventListener('click', (e) => {
       e.stopPropagation();
+      if (!window.confirm('Delete this conversation?')) return;
       const idx = conversations.findIndex(x => x.id === c.id);
       if (idx > -1) {
         conversations.splice(idx, 1);
@@ -245,6 +246,8 @@ async function streamChat(message) {
 
   if (assistantText.trim()) {
     activeMessages.push({ role: 'model', text: assistantText });
+    const qr = extractQuickReplies(assistantText);
+    if (qr.length) addQuickReplies(qr);
   }
 
   setStreaming(false);
@@ -400,6 +403,23 @@ function addQuickReplies(choices) {
   wrapper.appendChild(avatar); wrapper.appendChild(bubble);
   messagesEl.appendChild(wrapper);
   messagesEl.scrollTop = messagesEl.scrollHeight;
+}
+
+// Extract quick replies from assistant text like: "Admissions | Fees | Hostel"
+function extractQuickReplies(text) {
+  try {
+    if (!text) return [];
+    const lines = text.split('\n').map(l => l.trim()).filter(Boolean);
+    for (let i = lines.length - 1; i >= 0; i--) {
+      const line = lines[i];
+      if (line.includes('|')) {
+        const parts = line.split('|').map(s => s.trim()).filter(s => s);
+        const cleaned = parts.filter(p => p.length > 0 && p.length <= 60);
+        if (cleaned.length >= 2 && cleaned.length <= 6) return cleaned;
+      }
+    }
+  } catch (_) {}
+  return [];
 }
 
 // On first load, seed a CU-specific welcome + quick replies
