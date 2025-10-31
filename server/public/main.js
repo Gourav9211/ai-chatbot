@@ -1,0 +1,277 @@
+const messagesEl = document.getElementById('messages');
+const form = document.getElementById('chatForm');
+const input = document.getElementById('messageInput');
+const newChatBtn = document.getElementById('newChatBtn');
+const headerNewChatBtn = document.getElementById('headerNewChatBtn');
+const stopBtn = document.getElementById('stopBtn');
+const sendBtn = document.getElementById('sendBtn');
+const overlay = document.getElementById('warningOverlay');
+const acceptWarningBtn = document.getElementById('acceptWarningBtn');
+
+// Login overlay elements
+const loginOverlay = document.getElementById('loginOverlay');
+const loginId = document.getElementById('loginId');
+const loginPassword = document.getElementById('loginPassword');
+const loginBtn = document.getElementById('loginBtn');
+const loginError = document.getElementById('loginError');
+const togglePw = document.getElementById('togglePw');
+const rememberMe = document.getElementById('rememberMe');
+
+// History elements
+const historyListEl = document.getElementById('historyList');
+const historyEmptyEl = document.getElementById('historyEmpty');
+
+let currentController = null;
+
+// Local history state
+let conversations = [];
+let activeMessages = [];
+
+function loadConvos() {
+  try {
+    conversations = JSON.parse(localStorage.getItem('ai_chatbot_convos') || '[]');
+  } catch {
+    conversations = [];
+  }
+}
+function saveConvos() {
+  try { localStorage.setItem('ai_chatbot_convos', JSON.stringify(conversations)); } catch {}
+}
+function titleFrom(messages) {
+  const first = messages.find(m => m.role === 'user');
+  if (!first) return 'Conversation';
+  const t = first.text.trim().replace(/\s+/g, ' ');
+  return (t.length > 48 ? t.slice(0, 48) + '…' : t) || 'Conversation';
+}
+function renderHistory() {
+  if (!historyListEl) return;
+  historyListEl.innerHTML = '';
+  if (!conversations.length) {
+    historyEmptyEl?.classList.remove('hidden');
+    return;
+  }
+  historyEmptyEl?.classList.add('hidden');
+  conversations.slice().reverse().forEach((c) => {
+    const item = document.createElement('div');
+    item.className = 'history-item';
+    const dot = document.createElement('div'); dot.className = 'h-dot';
+    const title = document.createElement('div'); title.className = 'h-title'; title.textContent = c.title || 'Conversation';
+    item.appendChild(dot); item.appendChild(title);
+    item.addEventListener('click', () => renderTranscript(c.messages || []));
+    historyListEl.appendChild(item);
+  });
+}
+function renderTranscript(msgs) {
+  messagesEl.innerHTML = '';
+  for (const m of msgs) {
+    addMessage(m.role, m.text);
+  }
+  messagesEl.scrollTop = messagesEl.scrollHeight;
+}
+function saveCurrentConversationIfAny() {
+  if (activeMessages.length >= 2) {
+    const convo = { id: Date.now(), title: titleFrom(activeMessages), messages: activeMessages.slice(0) };
+    conversations.push(convo);
+    saveConvos();
+    renderHistory();
+  }
+  activeMessages = [];
+}
+
+function addMessage(role, text) {
+  const wrapper = document.createElement('div');
+  wrapper.className = 'message ' + (role === 'user' ? 'from-user' : 'from-bot');
+
+  const avatar = document.createElement('div');
+  avatar.className = 'avatar';
+  avatar.textContent = role === 'user' ? 'U' : 'A';
+
+  const bubble = document.createElement('div');
+  bubble.className = 'bubble' + (role === 'user' ? ' user' : '');
+  bubble.textContent = text;
+
+  wrapper.appendChild(avatar);
+  wrapper.appendChild(bubble);
+  messagesEl.appendChild(wrapper);
+  messagesEl.scrollTop = messagesEl.scrollHeight;
+  return bubble;
+}
+
+function setStreaming(v) {
+  if (v) {
+    stopBtn.disabled = false;
+    sendBtn.disabled = true;
+    sendBtn.classList.add('loading');
+    input.disabled = true;
+  } else {
+    stopBtn.disabled = true;
+    sendBtn.disabled = false;
+    sendBtn.classList.remove('loading');
+    input.disabled = false;
+  }
+}
+
+// Enter to send, Shift+Enter newline
+input.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && !e.shiftKey) {
+    e.preventDefault();
+    form.requestSubmit();
+  }
+});
+
+async function streamChat(message) {
+  currentController = new AbortController();
+  setStreaming(true);
+  const resp = await fetch('/api/chat', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ message }),
+    signal: currentController.signal,
+  }).catch((e) => ({ ok: false, status: 0, text: async () => e.message }));
+
+  if (!resp.ok || !resp.body) {
+    const text = await resp.text().catch(() => '');
+    addMessage('model', `Error: ${resp.status} ${text}`);
+    setStreaming(false);
+    currentController = null;
+    return;
+  }
+
+  const reader = resp.body.getReader();
+  const decoder = new TextDecoder();
+  let assistantText = '';
+  const bubble = addMessage('model', '');
+  bubble.classList.add('typing');
+
+  while (true) {
+    const { done, value } = await reader.read().catch(() => ({ done: true }));
+    if (done) break;
+    const chunk = decoder.decode(value, { stream: true });
+    assistantText += chunk;
+    bubble.textContent = assistantText;
+    bubble.classList.toggle('typing', assistantText.length === 0);
+    messagesEl.scrollTop = messagesEl.scrollHeight;
+  }
+
+  bubble.classList.remove('typing');
+
+  if (assistantText.trim()) {
+    activeMessages.push({ role: 'model', text: assistantText });
+  }
+
+  setStreaming(false);
+  currentController = null;
+}
+
+form.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const text = input.value.trim();
+  if (!text) return;
+  addMessage('user', text);
+  activeMessages.push({ role: 'user', text });
+  input.value = '';
+  autosize();
+  await streamChat(text);
+});
+
+function bindNewChat(btn) {
+  btn?.addEventListener('click', async () => {
+    try {
+      saveCurrentConversationIfAny();
+      if (currentController) { currentController.abort(); }
+      await fetch('/api/reset', { method: 'POST' });
+      messagesEl.innerHTML = '';
+      addMessage('model', 'New chat started. How can I help you today?');
+    } catch (e) {
+      console.error(e);
+    } finally {
+      setStreaming(false);
+      currentController = null;
+    }
+  });
+}
+
+bindNewChat(newChatBtn);
+bindNewChat(headerNewChatBtn);
+
+stopBtn?.addEventListener('click', () => {
+  if (currentController) {
+    currentController.abort();
+  }
+});
+
+// Suggestions
+for (const chip of document.querySelectorAll('.chip')) {
+  chip.addEventListener('click', () => {
+    input.value = chip.getAttribute('data-text') || chip.textContent || '';
+    autosize();
+    input.focus();
+  });
+}
+
+// Warning overlay show-once logic as a callable function
+function showWarningOverlayOnce() {
+  try {
+    const k = 'ai_chatbot_demo_ack';
+    if (sessionStorage.getItem(k) === '1') return;
+    overlay?.classList.remove('hidden');
+    acceptWarningBtn?.addEventListener('click', () => {
+      sessionStorage.setItem(k, '1');
+      overlay?.classList.add('hidden');
+    }, { once: true });
+  } catch (e) {}
+}
+
+// Login flow (demo/demo)
+(function loginInit() {
+  try {
+    const lk = 'ai_chatbot_demo_login';
+    const rememberKey = 'ai_chatbot_demo_remember';
+    const savedId = localStorage.getItem(rememberKey);
+    if (savedId) {
+      loginId.value = savedId;
+      rememberMe.checked = true;
+    }
+    const logged = sessionStorage.getItem(lk) === '1';
+    if (logged) {
+      loginOverlay?.classList.add('hidden');
+      showWarningOverlayOnce();
+    } else {
+      loginOverlay?.classList.remove('hidden');
+    }
+
+    togglePw?.addEventListener('click', () => {
+      const isPw = loginPassword.type === 'password';
+      loginPassword.type = isPw ? 'text' : 'password';
+      togglePw.setAttribute('aria-label', isPw ? 'Hide password' : 'Show password');
+    });
+
+    loginBtn?.addEventListener('click', () => {
+      const id = (loginId?.value || '').trim();
+      const pw = (loginPassword?.value || '').trim();
+      if (id === 'demo' && pw === 'demo') {
+        sessionStorage.setItem(lk, '1');
+        if (rememberMe?.checked) {
+          localStorage.setItem(rememberKey, id);
+        } else {
+          localStorage.removeItem(rememberKey);
+        }
+        loginOverlay?.classList.add('hidden');
+        showWarningOverlayOnce();
+        loginError?.classList.add('hidden');
+      } else {
+        loginError?.classList.remove('hidden');
+      }
+    });
+  } catch (e) {}
+})();
+
+// Load history on start and save on unload
+loadConvos();
+renderHistory();
+window.addEventListener('beforeunload', () => {
+  try { saveCurrentConversationIfAny(); } catch {}
+});
+
+// Greet on load
+addMessage('model', 'Hello! I\'m your AI support agent. Ask me anything about your account, orders, or troubleshooting.');
