@@ -20,22 +20,32 @@ body::after { inset: -10% -10% auto auto; width: 40vmax; height: 40vmax; opacity
 
 #app {
   display: grid;
-  grid-template-columns: 280px 1fr;
+  /* use a variable so we can collapse reliably */
+  --sidebar-w: 280px;
+  grid-template-columns: var(--sidebar-w) 1fr;
   height: 100vh;
   overflow: hidden;
-  min-height: 0; /* allow children to shrink and scroll */
+  min-height: 0;
 }
-
+#app.sidebar-collapsed { --sidebar-w: 0px; }
 .sidebar {
   background: linear-gradient(180deg, rgba(17,22,50,0.95), rgba(11,16,32,0.92) 55%);
   border-right: 1px solid rgba(255,255,255,0.08);
   padding: 20px;
   overflow-y: auto;
+  transition: transform .2s ease, opacity .2s ease; /* smooth hide */
+  will-change: transform;
 }
+#app.sidebar-collapsed .sidebar { transform: translateX(-100%); opacity: 0; pointer-events: none; }
+/* FIX: the following line was mistakenly applied to .sidebar previously */
 .brand { display: inline-flex; align-items: center; gap: 8px; font-weight: 700; font-size: 20px; }
 .brand .logo { filter: drop-shadow(0 2px 6px rgba(88,100,225,0.35)); }
 .brand-inline { display: inline-flex; align-items: center; gap: 8px; font-weight: 700; color: #eef1ff; }
 .gem-logo { display: inline-flex; margin-right: 4px; }
+
+/* Sidebar toggle button */
+.icon-btn.toggle-sidebar { border: 1px solid rgba(255,255,255,0.16); background: rgba(15,21,51,0.6); border-radius: 10px; width: 36px; height: 36px; display: inline-grid; place-items: center; margin-right: 8px; cursor: pointer; }
+.icon-btn.toggle-sidebar:hover { background: rgba(24,30,64,0.8); }
 
 .tips h4 { margin: 16px 0 8px; font-size: 12px; text-transform: uppercase; letter-spacing: .08em; color: #9aa3bc; }
 .tips ul { list-style: none; padding: 0; margin: 0; }
@@ -67,10 +77,12 @@ body::after { inset: -10% -10% auto auto; width: 40vmax; height: 40vmax; opacity
 .status { display: inline-flex; align-items: center; gap: 8px; color: #9aa3bc; font-size: 14px; }
 .dot { width: 8px; height: 8px; border-radius: 999px; background: #4ade80; box-shadow: 0 0 8px rgba(74,222,128,0.6); animation: pulse 2.2s infinite ease-in-out; }
 
-/* Suggestions smaller chips + entry animation */
-.suggestions { display: flex; gap: 8px; flex-wrap: wrap; padding: 10px 20px; border-bottom: 1px solid rgba(255,255,255,0.06); }
-.chip { font-size: 13px; color: #c9d1ee; background: rgba(15,21,51,0.8); border: 1px solid rgba(255,255,255,0.1); padding: 6px 10px; border-radius: 999px; cursor: pointer; transition: transform .08s ease, background .2s ease, box-shadow .2s ease; animation: floatIn .35s ease both; }
-.chip:hover { background: #1a2040; transform: translateY(-1px); box-shadow: 0 6px 18px rgba(0,0,0,0.2); }
+/* Top suggestions removed entirely */
+.suggestions { display: none !important; }
+
+/* Space tweak so recommendations as a message look neat */
+.recommendations-message .avatar { margin-top: 2px; }
+.recommendations-bubble { margin-top: -4px; }
 
 .messages { 
   padding: 20px; 
@@ -89,58 +101,120 @@ body::after { inset: -10% -10% auto auto; width: 40vmax; height: 40vmax; opacity
 .bubble.user { background: #18224f; }
 .bubble.typing::after { content: ""; display: inline-block; width: 10px; height: 1.2em; margin-left: 3px; border-right: 2px solid rgba(203, 209, 255, 0.8); animation: caretBlink 0.9s steps(1) infinite; vertical-align: text-bottom; }
 
+/* In-message vertical recommendations list */
+.recommendations-bubble { background: transparent; border: none; padding: 0; box-shadow: none; }
+.recommendations { display: flex; flex-direction: column; gap: 8px; }
+.recommendations .rec-card { padding: 8px 10px; display: grid; grid-template-columns: auto 1fr; gap: 10px; align-items: center; border: 1px solid rgba(88,100,225,0.28); border-radius: 12px; background: radial-gradient(120% 120% at -10% -20%, rgba(88,100,225,0.18), rgba(20,26,60,0.7) 60%); box-shadow: 0 10px 28px rgba(0,0,0,0.35); color: #e8ecff; }
+.recommendations .rec-title { font-size: 13px; font-weight: 600; }
+.recommendations .rec-icon { width: 26px; height: 26px; border-radius: 8px; display: grid; place-items: center; background: rgba(255,255,255,0.08); border: 1px solid rgba(255,255,255,0.12); }
+
+/* Composer */
 .composer { 
-  position: relative; 
-  display: grid; 
-  grid-template-columns: 1fr auto; 
-  gap: 10px; 
-  padding: 16px 20px; 
-  border-top: 1px solid rgba(255,255,255,0.08); 
-  padding-bottom: calc(16px + env(safe-area-inset-bottom));
-  background: linear-gradient(180deg, rgba(17,23,55,0.65), rgba(9,13,30,0.6));
-  backdrop-filter: blur(10px);
-  -webkit-backdrop-filter: blur(10px);
-  border-top: 1px solid rgba(255,255,255,0.12);
-  box-shadow: 0 -10px 30px rgba(5,10,27,0.5), inset 0 1px 0 rgba(255,255,255,0.06);
+  position: sticky; bottom: 0; /* keep pinned on small screens too */
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 12px;
+  padding: 16px 20px;
+  background: linear-gradient(180deg, rgba(8,12,30,0.92), rgba(6,10,24,0.92));
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border-top: 1px solid rgba(255,255,255,0.14);
+  box-shadow: 0 -12px 34px rgba(0,0,0,0.55), inset 0 1px 0 rgba(255,255,255,0.06);
 }
-.composer::before {
-  opacity: .7; /* soften gradient divider */
-}
+/* Ensure attachments row spans full width so textarea sits on the left next row */
+.composer .attachments { grid-column: 1 / -1; }
+/* Explicitly place textarea and actions into left/right columns */
+.composer textarea { grid-column: 1 / 2; width: 100%; }
+.composer .actions { grid-column: 2 / 3; align-self: end; justify-self: end; }
 
-/* Input pill with leading icon and richer focus states */
+/* Input field: stronger contrast and auto-grow (start at ~2 lines) */
 .composer textarea {
-  border-radius: 16px;
-  padding-left: 40px; /* space for icon */
-  background: linear-gradient(180deg, #0d1330, #0a0f26);
-  border: 1px solid rgba(230,235,255,0.18);
-  color: #f3f5ff;
-  box-shadow: inset 0 2px 14px rgba(0,0,0,0.45), 0 0 0 1px rgba(88,100,225,0.0);
-  transition: border-color .2s ease, box-shadow .25s ease, transform .06s ease;
-  background-image: url("data:image/svg+xml;utf8,<?xml version='1.0' encoding='UTF-8'?><svg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='none'><path d='M4 7a4 4 0 014-4h8a4 4 0 014 4v6a4 4 0 01-4 4h-3l-4 4v-4H8a4 4 0 01-4-4V7z' stroke='%23cbd1ff' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round' opacity='0.9'/></svg>");
-  background-repeat: no-repeat;
-  background-size: 16px 16px;
-  background-position: 14px 50%;
+  height: auto;
+  min-height: 64px; /* ~2 lines visible initially */
+  max-height: 220px; /* cap growth */
+  overflow: hidden; /* avoid inner scrollbar while autosizing */
+  resize: none;
+  border-radius: 14px;
+  padding: 12px 14px 12px 42px; /* left icon space */
+  background: linear-gradient(180deg, #0f1536, #0b112d);
+  border: 1px solid rgba(215,225,255,0.22);
+  color: #f7f9ff;
+  box-shadow: inset 0 2px 14px rgba(0,0,0,0.5);
+  background-image: url("data:image/svg+xml;utf8,<?xml version='1.0' encoding='UTF-8'?><svg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='none'><path d='M4 7a4 4 0 014-4h8a4 4 0 014 4v6a4 4 0 01-4 4h-3l-4 4v-4H8a4 4 0 01-4-4V7z' stroke='%23e6ebff' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round' opacity='0.9'/></svg>");
+  background-repeat: no-repeat; background-size: 16px 16px; background-position: 14px 50%;
 }
-.composer textarea::placeholder { color: rgba(203,209,255,0.6); }
-.composer textarea:focus {
-  border-color: rgba(116,133,245,0.9);
-  box-shadow: 0 0 0 2px rgba(116,133,245,0.35), 0 8px 22px rgba(88,100,225,0.25), inset 0 2px 14px rgba(0,0,0,0.45);
-  transform: translateY(-1px);
+.composer textarea::placeholder { color: rgba(230,235,255,0.7); }
+.composer textarea:focus { border-color: rgba(120,140,255,0.95); box-shadow: 0 0 0 2px rgba(120,140,255,0.45), inset 0 2px 14px rgba(0,0,0,0.5); }
+
+/* Actions area */
+.composer .actions { display: inline-flex; gap: 8px; align-items: center; }
+/* Make input area effectively longer by shrinking action buttons */
+.composer .actions .btn { padding: 0 10px; }
+.btn.primary.send .btn-label { display: none; }
+
+/* Buttons: ensure visible text and icons */
+.btn { height: 44px; padding: 0 14px; border-radius: 12px; border: 1px solid rgba(255,255,255,0.18); color: #f7f9ff; font-weight: 600; letter-spacing: .01em; }
+.btn .btn-label { color: #f7f9ff; }
+.btn .btn-icon svg, .btn svg path, .btn svg rect { filter: drop-shadow(0 1px 4px rgba(0,0,0,0.45)); }
+
+/* Secondary button (attach) */
+.btn.secondary { background: linear-gradient(180deg, #151c48, #10163a); box-shadow: 0 8px 18px rgba(0,0,0,0.45); }
+.btn.secondary:hover { background: linear-gradient(180deg, #192254, #121a40); }
+
+/* Primary Send redesign: pill with glow and send trail animation */
+.btn.primary.send {
+  position: relative;
+  background: linear-gradient(135deg, #5b6aff, #3344dd);
+  box-shadow: 0 10px 28px rgba(52,69,220,0.5), inset 0 0 0 1px rgba(255,255,255,0.08);
+  overflow: hidden;
+}
+.btn.primary.send:hover { transform: translateY(-1px); box-shadow: 0 12px 32px rgba(52,69,220,0.6); }
+.btn.primary.send:active { transform: translateY(0); }
+.btn.primary.send .btn-spinner { display: none; }
+.btn.primary.send.loading .btn-label { opacity: .6; }
+.btn.primary.send .btn-icon { margin-right: 6px; display: inline-block; }
+.btn.primary.send:hover .btn-icon { animation: sendWiggle .5s ease; }
+
+/* Send trail shimmer */
+.btn.primary.send::after {
+  content: "";
+  position: absolute; inset: -60% -20% auto auto; width: 120%; height: 220%;
+  background: radial-gradient(30% 40% at 60% 50%, rgba(255,255,255,0.18), transparent 60%),
+              linear-gradient(90deg, rgba(255,255,255,0.08), rgba(255,255,255,0));
+  transform: translateX(-120%);
+  pointer-events: none;
+}
+.btn.primary.send:hover::after { animation: sweep 0.9s ease forwards; }
+
+@keyframes sweep { from { transform: translateX(-120%)} to { transform: translateX(80%)} }
+@keyframes sendWiggle { 0% { transform: translateX(0)} 50% { transform: translateX(2px)} 100% { transform: translateX(0)} }
+
+/* Attachments bar small pills */
+.attachments { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 6px; }
+.attachments .att { display: inline-flex; align-items: center; gap: 8px; padding: 6px 8px; background: rgba(20,26,60,0.8); border: 1px solid rgba(255,255,255,0.12); border-radius: 10px; }
+.attachments .thumb { width: 26px; height: 26px; border-radius: 6px; object-fit: cover; }
+.attachments .name { font-size: 12px; color: #e6ebff; max-width: 160px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.attachments .remove { border: none; background: rgba(255,255,255,0.1); color: #fff; width: 22px; height: 22px; border-radius: 6px; cursor: pointer; }
+.attachments .remove:hover { background: rgba(255,255,255,0.2); }
+
+/* Ensure message bubbles contrast */
+.bubble { background: #0d1330; border-color: rgba(230,235,255,0.2); color: #f1f4ff; }
+.bubble.user { background: #1b265e; }
+
+/* Button focus visible */
+.btn:focus-visible { outline: 2px solid rgba(120,140,255,0.85); outline-offset: 2px; }
+
+/* Loading state for send */
+.btn.primary.send.loading { opacity: .85; cursor: default; }
+
+@media (max-width: 860px) {
+  /* keep two columns, just shrink sidebar width */
+  #app { --sidebar-w: 220px; }
+  /* collapsed state already sets width to 0 */
+  .composer { grid-template-columns: 1fr auto; padding: 12px 14px; }
+  .composer textarea { min-height: 60px; }
 }
 
-/* Buttons micro-interactions */
-.btn { height: 44px; border-radius: 14px; }
-.btn.primary {
-  background: linear-gradient(135deg, #4f5ce0, #2d3ac2);
-  background-size: 200% 200%;
-  transition: background-position .4s ease, transform .08s ease, box-shadow .2s ease;
-  box-shadow: 0 8px 22px rgba(56,71,194,0.35);
-}
-.btn.primary:hover { background-position: 100% 0; box-shadow: 0 10px 26px rgba(56,71,194,0.45); }
-.btn.secondary { background: linear-gradient(180deg, #141a44, #0f1536); border-color: rgba(255,255,255,0.14); box-shadow: 0 8px 20px rgba(0,0,0,0.35); }
-.btn.danger { background: linear-gradient(180deg, #8c2538, #68192a); box-shadow: 0 8px 20px rgba(122,26,43,0.35); }
-
-/* Reduce animation jitter on low-power devices */
 @media (prefers-reduced-motion: reduce) {
   * { animation: none !important; transition: none !important; }
 }
@@ -151,11 +225,5 @@ body::after { inset: -10% -10% auto auto; width: 40vmax; height: 40vmax; opacity
 @keyframes slideUp { from { opacity: 0; transform: translateY(8px) } to { opacity: 1; transform: translateY(0) } }
 @keyframes pulse { 0%, 100% { transform: scale(1)} 50% { transform: scale(1.25)} }
 @keyframes caretBlink { 0%, 49% { border-color: rgba(203,209,255,0.8) } 50%, 100% { border-color: transparent } }
-@keyframes blobFloat { 0% { transform: rotate(0deg) translate(0,0) } 50% { transform: rotate(180deg) translate(3%, -2%) } 100% { transform: rotate(360deg) translate(0,0) } }
-@keyframes spin { from { transform: rotate(0deg) } to { transform: rotate(360deg) } }
-
-@media (max-width: 860px) {
-  #app { grid-template-columns: 1fr; }
-  .sidebar { display: none; }
-  .suggestions { padding-top: 8px; }
+@keyframes blobFloat { 0% { transform: rotate(0deg) translate(0,0) } 50% { transform: rotate(180deg) translate(3%, -2%) } 100% { transform: rotate(360deg) translate(0,0) }
 }

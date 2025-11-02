@@ -3,7 +3,6 @@ const form = document.getElementById('chatForm');
 const input = document.getElementById('messageInput');
 const newChatBtn = document.getElementById('newChatBtn');
 const headerNewChatBtn = document.getElementById('headerNewChatBtn');
-const stopBtn = document.getElementById('stopBtn');
 const sendBtn = document.getElementById('sendBtn');
 const attachBtn = document.getElementById('attachBtn');
 const fileInput = document.getElementById('fileInput');
@@ -34,8 +33,10 @@ let conversations = [];
 function autosize() {
   try {
     input.style.height = 'auto';
-    const h = Math.min(input.scrollHeight || 0, 200);
-    input.style.height = (h || 48) + 'px';
+    const base = 64; // ~2 lines
+    const max = 220;
+    const next = Math.min(Math.max(input.scrollHeight || base, base), max);
+    input.style.height = next + 'px';
   } catch (_) {}
 }
 input?.addEventListener('input', autosize);
@@ -144,12 +145,10 @@ function addMessage(role, text) {
 
 function setStreaming(v) {
   if (v) {
-    stopBtn.disabled = false;
     sendBtn.disabled = true;
     sendBtn.classList.add('loading');
     input.disabled = true;
   } else {
-    stopBtn.disabled = true;
     sendBtn.disabled = false;
     sendBtn.classList.remove('loading');
     input.disabled = false;
@@ -285,6 +284,8 @@ function bindNewChat(btn) {
       input.value = '';
       autosize();
       addMessage('model', 'New chat started. How can I help you today?');
+      // Also show vertical recommendations under the first message
+      addQuickReplies(CU_QUICK_REPLIES);
       // Reset active conversation state
       activeMessages = [];
     } catch (e) {
@@ -298,21 +299,6 @@ function bindNewChat(btn) {
 
 bindNewChat(newChatBtn);
 bindNewChat(headerNewChatBtn);
-
-stopBtn?.addEventListener('click', () => {
-  if (currentController) {
-    currentController.abort();
-  }
-});
-
-// Suggestions
-for (const chip of document.querySelectorAll('.chip')) {
-  chip.addEventListener('click', () => {
-    input.value = chip.getAttribute('data-text') || chip.textContent || '';
-    autosize();
-    input.focus();
-  });
-}
 
 // Warning overlay show-once logic as a callable function
 function showWarningOverlayOnce() {
@@ -378,51 +364,44 @@ window.addEventListener('beforeunload', () => {
   try { saveCurrentConversationIfAny(); } catch {}
 });
 
-// Greet on load
-addMessage('model', 'Hello! I\'m your AI support agent. Ask me anything about your account, orders, or troubleshooting.');
-
-// Quick replies feature
+// Quick replies feature -> now vertical recommendations below the first message
 function addQuickReplies(choices) {
   const wrapper = document.createElement('div');
-  wrapper.className = 'message quick-replies-message from-bot';
+  wrapper.className = 'message recommendations-message from-bot';
   const avatar = document.createElement('div'); avatar.className = 'avatar'; avatar.textContent = 'A';
-  const bubble = document.createElement('div'); bubble.className = 'bubble reply-choices';
-  const row = document.createElement('div'); row.className = 'quick-replies';
-  (choices || []).forEach((c) => {
-    const btn = document.createElement('button');
-    btn.type = 'button';
-    btn.className = 'qr';
-    btn.textContent = c;
-    btn.addEventListener('click', () => {
-      input.value = c;
-      form.requestSubmit();
-    });
-    row.appendChild(btn);
+  const bubble = document.createElement('div'); bubble.className = 'bubble recommendations-bubble';
+  const list = document.createElement('div'); list.className = 'recommendations';
+
+  const seen = new Set();
+  const cleaned = (choices || [])
+    .map(c => (c || '').trim())
+    .filter(Boolean)
+    .filter(c => { if (seen.has(c.toLowerCase())) return false; seen.add(c.toLowerCase()); return true; });
+  const MAX = 5;
+  const toShow = cleaned.slice(0, MAX);
+
+  toShow.forEach((c, i) => {
+    const label = c.length > 60 ? c.slice(0, 60) + '…' : c;
+    const card = document.createElement('div');
+    card.className = 'rec-card';
+    const icon = document.createElement('div'); icon.className = 'rec-icon';
+    icon.innerHTML = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none"><path d="M3 11l17-8-8 17-2-6-7-3z" fill="#cbd1ff"/></svg>';
+    const textWrap = document.createElement('div');
+    const t = document.createElement('div'); t.className = 'rec-title'; t.textContent = label; t.title = c;
+    textWrap.appendChild(t);
+    card.appendChild(icon); card.appendChild(textWrap);
+    card.style.animationDelay = (i * 60) + 'ms';
+    card.addEventListener('click', () => { input.value = c; form.requestSubmit(); });
+    list.appendChild(card);
   });
-  bubble.appendChild(row);
+
+  bubble.appendChild(list);
   wrapper.appendChild(avatar); wrapper.appendChild(bubble);
   messagesEl.appendChild(wrapper);
   messagesEl.scrollTop = messagesEl.scrollHeight;
 }
 
-// Extract quick replies from assistant text like: "Admissions | Fees | Hostel"
-function extractQuickReplies(text) {
-  try {
-    if (!text) return [];
-    const lines = text.split('\n').map(l => l.trim()).filter(Boolean);
-    for (let i = lines.length - 1; i >= 0; i--) {
-      const line = lines[i];
-      if (line.includes('|')) {
-        const parts = line.split('|').map(s => s.trim()).filter(s => s);
-        const cleaned = parts.filter(p => p.length > 0 && p.length <= 60);
-        if (cleaned.length >= 2 && cleaned.length <= 6) return cleaned;
-      }
-    }
-  } catch (_) {}
-  return [];
-}
-
-// On first load, seed a CU-specific welcome + quick replies
+// On first load, seed a CU-specific welcome + recommendations
 function showWelcome() {
   messagesEl.innerHTML = '';
   addMessage('model', "Hello! I'm the Chandigarh University support assistant. How can I help you today?");
@@ -436,5 +415,20 @@ function showWelcome() {
     if (sessionStorage.getItem(k) === '1') return;
     sessionStorage.setItem(k, '1');
     showWelcome();
+  } catch (e) {}
+})();
+
+const appRoot = document.getElementById('app');
+const toggleSidebarBtn = document.getElementById('toggleSidebarBtn');
+(function initSidebarToggle(){
+  try {
+    const key = 'ai_chatbot_sidebar_collapsed';
+    const saved = localStorage.getItem(key);
+    if (saved === '1') appRoot?.classList.add('sidebar-collapsed');
+    toggleSidebarBtn?.addEventListener('click', () => {
+      const collapsed = appRoot?.classList.toggle('sidebar-collapsed');
+      toggleSidebarBtn.setAttribute('aria-pressed', collapsed ? 'true' : 'false');
+      localStorage.setItem(key, collapsed ? '1' : '0');
+    });
   } catch (e) {}
 })();
